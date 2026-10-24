@@ -93,11 +93,11 @@ int main(int argc, char* argv[]) {
     std::cout << "[CONFIG] fee="        << cfg.fee
               << " | minProfit="        << cfg.minProfitPercent << "%"
               << " | maxQuoteAge="      << cfg.maxQuoteAgeMs    << "ms"
-              << " | cooldown="         << cfg.cooldownSeconds  << "s"
-              << " | scanInterval="     << cfg.scanIntervalMs   << "ms"
+              << " | cooldown="         << cfg.cooldownSeconds  << "s\n"
+              << "[CONFIG] scanInterval=" << cfg.scanIntervalMs   << "ms"
               << " | source="           << cfg.sourceCurrency
               << " | symbols="          << cfg.symbols.size()
-              << " | simNotionals=";
+              << " | sim=";
     for (size_t i = 0; i < cfg.simulationNotionals.size(); ++i) {
         std::cout << "$" << cfg.simulationNotionals[i];
         if (i + 1 < cfg.simulationNotionals.size()) std::cout << "/";

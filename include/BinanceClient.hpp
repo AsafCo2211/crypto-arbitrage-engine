@@ -247,7 +247,12 @@ public:
             }
         });
 
-        std::cout << "[SYSTEM] Connecting to " << url << " ...\n";
+        // Log the host only — the full URL lists every stream and wraps
+        // across several terminal lines.
+        auto query = url.find('?');
+        std::cout << "[SYSTEM] Connecting to "
+                  << (query == std::string::npos ? url : url.substr(0, query))
+                  << " ...\n";
         webSocket.start();
     }
 
