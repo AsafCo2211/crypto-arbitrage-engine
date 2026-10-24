@@ -28,5 +28,7 @@ ArbitrageTests
 .DS_Store
 
 # Runtime output
-opportunities.csvTesting/
+opportunities.csv
+
+# CTest
 Testing/
