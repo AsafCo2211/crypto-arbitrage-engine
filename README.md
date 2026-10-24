@@ -94,7 +94,7 @@ flowchart LR
 
 ```bash
 # macOS
-brew install cmake openssl nlohmann-json
+brew install cmake openssl@3 nlohmann-json
 # Ubuntu / Debian
 sudo apt-get install cmake build-essential libssl-dev nlohmann-json3-dev
 ```
