@@ -57,6 +57,18 @@ struct PriceLevel {
 };
 
 /**
+ * @brief Sanity check for a top-of-book quote before it enters the graph.
+ *
+ * Rejects non-positive prices (log(0) / log(negative) would corrupt the
+ * Bellman-Ford distances) and crossed books (bid >= ask). A crossed book
+ * would let the engine "buy" below the price it "sells" at, producing a
+ * phantom arbitrage cycle out of a stale or out-of-order message.
+ */
+inline bool isSaneTopOfBook(double bestBid, double bestAsk) {
+    return bestBid > 0.0 && bestAsk > 0.0 && bestBid < bestAsk;
+}
+
+/**
  * @brief A snapshot of one symbol's order book (up to 5 levels per side).
  *
  * Updated on every @depth5 WebSocket message for the corresponding symbol.

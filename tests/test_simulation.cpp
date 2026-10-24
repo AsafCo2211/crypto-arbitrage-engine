@@ -150,3 +150,18 @@ TEST(SimulationTest, ViableFlagRespectsMinProfitThreshold) {
     EXPECT_FALSE(results[0].viable)
         << "No trade can be viable against a 999% profit threshold";
 }
+// ── Quote sanity ─────────────────────────────────────────────────────────────
+
+TEST(QuoteSanityTest, AcceptsNormalSpread) {
+    EXPECT_TRUE(isSaneTopOfBook(3199.9, 3200.1));
+}
+
+TEST(QuoteSanityTest, RejectsNonPositivePrices) {
+    EXPECT_FALSE(isSaneTopOfBook(0.0, 3200.0));
+    EXPECT_FALSE(isSaneTopOfBook(3199.0, -1.0));
+}
+
+TEST(QuoteSanityTest, RejectsCrossedOrLockedBook) {
+    EXPECT_FALSE(isSaneTopOfBook(3200.5, 3200.0)); // crossed
+    EXPECT_FALSE(isSaneTopOfBook(3200.0, 3200.0)); // locked
+}

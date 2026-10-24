@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "Graph.hpp"
 
+#include <chrono>
+#include <thread>
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Builds a small graph with a known profitable triangle:
@@ -83,6 +86,20 @@ TEST(GraphTest, DetectsKnownArbitrageCycle) {
     std::string output = testing::internal::GetCapturedStdout();
     EXPECT_NE(output.find("ARBITRAGE"), std::string::npos)
         << "Expected arbitrage to be detected but got:\n" << output;
+}
+
+TEST(GraphTest, StaleQuotesAreIgnored) {
+    // Same profitable triangle, but every quote is older than the
+    // freshness limit — a cycle built from stale prices must not fire.
+    Graph g = buildArbitrageGraph(0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    testing::internal::CaptureStdout();
+    g.findArbitrage("USDT", 0.0, /*maxQuoteAgeMs=*/10, 0);
+    std::string output = testing::internal::GetCapturedStdout();
+
+    EXPECT_EQ(output.find("ARBITRAGE"), std::string::npos)
+        << "Arbitrage reported from quotes older than maxQuoteAgeMs";
 }
 
 TEST(GraphTest, NoFalsePositiveOnFairMarket) {
