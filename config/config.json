@@ -16,7 +16,7 @@
         { "stream": "dogeusdt", "base": "DOGE", "quote": "USDT" },
         { "stream": "dotusdt",  "base": "DOT",  "quote": "USDT" },
         { "stream": "linkusdt", "base": "LINK", "quote": "USDT" },
-        { "stream": "maticusdt","base": "MATIC","quote": "USDT" },
+        { "stream": "polusdt",  "base": "POL",  "quote": "USDT" },
         { "stream": "ethbtc",   "base": "ETH",  "quote": "BTC"  },
         { "stream": "bnbbtc",   "base": "BNB",  "quote": "BTC"  },
         { "stream": "solbtc",   "base": "SOL",  "quote": "BTC"  },
@@ -25,7 +25,7 @@
         { "stream": "dogebtc",  "base": "DOGE", "quote": "BTC"  },
         { "stream": "dotbtc",   "base": "DOT",  "quote": "BTC"  },
         { "stream": "linkbtc",  "base": "LINK", "quote": "BTC"  },
-        { "stream": "maticbtc", "base": "MATIC","quote": "BTC"  },
+        { "stream": "polbtc",   "base": "POL",  "quote": "BTC"  },
         { "stream": "ltcusdt",  "base": "LTC",  "quote": "USDT" }
     ]
 }
