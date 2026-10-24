@@ -206,9 +206,9 @@ public:
                     double bestAsk = asks.front().price;
                     double bestBid = bids.front().price;
 
-                    // Reject invalid prices — log(0) or log(negative) would
-                    // corrupt the entire Bellman-Ford distance array.
-                    if (bestAsk <= 0.0 || bestBid <= 0.0) {
+                    // Reject non-positive prices and crossed books — see
+                    // isSaneTopOfBook() in OrderBook.hpp.
+                    if (!isSaneTopOfBook(bestBid, bestAsk)) {
                         if (stats) stats->recordRejectedQuote();
                         return;
                     }
@@ -250,4 +250,8 @@ public:
         std::cout << "[SYSTEM] Connecting to " << url << " ...\n";
         webSocket.start();
     }
+
+    /// Closes the WebSocket and stops its background thread. After this
+    /// returns no more callbacks touch the graph or the order book.
+    void disconnect() { webSocket.stop(); }
 };

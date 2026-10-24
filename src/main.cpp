@@ -13,7 +13,7 @@
  *
  * | Thread          | Role                                                    |
  * |-----------------|---------------------------------------------------------|
- * | Main thread     | Blocks on std::cin.get() waiting for user to press Enter|
+ * | Main thread     | Waits for Ctrl+C / SIGTERM or the --duration deadline   |
  * | WebSocket thread| IXWebSocket internal — fires callbacks on every tick    |
  * | Scanner thread  | Wakes on marketDirty flag, runs Bellman-Ford            |
  * | Summary thread  | Sleeps in 100ms increments, prints stats every 30s      |
@@ -30,6 +30,8 @@
 #include <thread>
 #include <chrono>
 #include <unordered_map>
+#include <csignal>
+#include <cstdlib>
 #include "Graph.hpp"
 #include "BinanceClient.hpp"
 #include "Config.hpp"
@@ -37,7 +39,44 @@
 #include "OrderBook.hpp"
 #include "SimulationEngine.hpp"
 
-int main() {
+namespace {
+// Set from the signal handler; std::sig_atomic_t is the only type the
+// standard guarantees is safe to write there.
+volatile std::sig_atomic_t g_stopRequested = 0;
+
+void onStopSignal(int) { g_stopRequested = 1; }
+
+void printUsage(const char* prog) {
+    std::cout << "Usage: " << prog << " [--duration SECONDS]\n"
+              << "  --duration SECONDS  stop automatically after SECONDS"
+                 " (default: run until Ctrl+C)\n";
+}
+} // namespace
+
+int main(int argc, char* argv[]) {
+    // ── Command line ─────────────────────────────────────────────────────────
+    int durationSeconds = 0; // 0 = run until Ctrl+C / SIGTERM
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--duration" && i + 1 < argc) {
+            durationSeconds = std::atoi(argv[++i]);
+            if (durationSeconds <= 0) {
+                std::cerr << "--duration must be a positive number of seconds\n";
+                return 1;
+            }
+        } else if (arg == "--help" || arg == "-h") {
+            printUsage(argv[0]);
+            return 0;
+        } else {
+            std::cerr << "Unknown argument: " << arg << "\n";
+            printUsage(argv[0]);
+            return 1;
+        }
+    }
+
+    std::signal(SIGINT,  onStopSignal);
+    std::signal(SIGTERM, onStopSignal);
+
     std::cout << "[SYSTEM] Crypto Arbitrage Engine starting...\n";
 
     // ── Load config ──────────────────────────────────────────────────────────
@@ -132,7 +171,7 @@ int main() {
 
     // ── Summary thread ────────────────────────────────────────────────────────
     // Sleeps in 100ms increments (not a single 30s sleep) so that when the
-    // user presses Enter, the thread wakes within ~100ms instead of blocking
+    // engine stops, the thread wakes within ~100ms instead of blocking
     // for the remainder of the 30-second window.
     std::thread summaryThread([&]() {
         int ticksLeft = 300; // 300 × 100ms = 30 seconds
@@ -148,11 +187,24 @@ int main() {
 
     std::cout << "[SYSTEM] Engine running — listening to "
               << cfg.symbols.size() << " pairs.\n";
-    std::cout << "[SYSTEM] Stats summary every 30s. Press Enter to stop.\n\n";
+    std::cout << "[SYSTEM] Stats summary every 30s. ";
+    if (durationSeconds > 0)
+        std::cout << "Stopping automatically after " << durationSeconds << "s.\n\n";
+    else
+        std::cout << "Press Ctrl+C to stop.\n\n";
 
-    std::cin.get(); // Block until user presses Enter
+    // Wait for a stop signal or the --duration deadline. Polling every
+    // 100ms keeps the signal handler trivial (it only sets a flag).
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::seconds(durationSeconds);
+    while (!g_stopRequested &&
+           (durationSeconds == 0 || std::chrono::steady_clock::now() < deadline)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────
+    std::cout << "\n[SYSTEM] Stopping...\n";
+    binance.disconnect();
     running.store(false, std::memory_order_relaxed);
     if (scanner.joinable())       scanner.join();
     if (summaryThread.joinable()) summaryThread.join();
