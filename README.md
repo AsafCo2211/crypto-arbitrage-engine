@@ -4,7 +4,7 @@ A real-time triangular-arbitrage detector for the Binance spot market, in C++20.
 
 [![CI](https://github.com/AsafCo2211/crypto-arbitrage-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/AsafCo2211/crypto-arbitrage-engine/actions/workflows/ci.yml)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
-![Tests](https://img.shields.io/badge/tests-32%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)
 
 > **Detection and simulation only — it never places orders.** At retail latency these opportunities are usually gone before you could act; the point of the project is the market model, the graph algorithm, and the concurrency around a live feed.
 
@@ -34,6 +34,19 @@ Buying $500 of ETH with ask levels  3200.00 × 0.10,  3200.40 × 0.25, ...
 
 Each size is reported as viable or not, and flagged when the 5 visible levels can't fill it at all.
 
+## When there's nothing to find
+
+On a liquid exchange, a three-leg loop costs about 0.3% in fees alone, so most of the time no profitable cycle exists — and "0 opportunities" says nothing about how close the market came.
+
+So on every scan the engine also evaluates **every three-leg loop through the source currency** (`Graph::bestTriangle`, ~1,600 edge pairs for the default market) and keeps the best net result, profitable or not. The 30-second summary reports it, for example:
+
+```
+[STATS] Opportunities found: 0
+[STATS] Closest cycle:       -0.2134% net  (USDT->SOL->BTC->USDT)
+```
+
+That number is a direct measurement of market efficiency: how far the best available loop sits below break-even after fees.
+
 ## Guarding against false signals
 
 Live market data is noisy, and a single bad quote can manufacture a fake cycle.
@@ -57,7 +70,7 @@ flowchart LR
     SC[Scanner thread] -- when prices changed --> G
     G -- negative cycle --> SE[SimulationEngine<br/>walks the book]
     OB --> SE
-    G --> ST[StatsCollector<br/>console + CSV]
+    G -- closest cycle --> ST[StatsCollector<br/>console + CSV]
 ```
 
 ### Threads and shared state
@@ -119,7 +132,7 @@ The default market is ten coins quoted in both USDT and BTC, which gives the gra
 
 ## Tests
 
-32 GoogleTest cases, run on every push by GitHub Actions.
+38 GoogleTest cases, run on every push by GitHub Actions.
 
 ```bash
 cmake -B build -DBUILD_TESTS=ON
@@ -129,7 +142,7 @@ ctest --test-dir build --output-on-failure
 
 | File | Covers |
 |---|---|
-| `test_graph.cpp` | Detects a known profitable cycle; no false positive on consistent rates; fees and threshold filter correctly; stale quotes ignored |
+| `test_graph.cpp` | Detects a known profitable cycle; no false positive on consistent rates; fees and threshold filter correctly; stale quotes ignored. Closest-cycle search: exact fee cost on a fair market, picks the better loop direction, summary output |
 | `test_simulation.cpp` | Order-book lookup by side; slippage on deep vs. shallow books; insufficient-liquidity flag; quote sanity (crossed and locked books) |
 | `test_config.cpp` | Loading, validation, and every error case |
 
@@ -138,7 +151,7 @@ ctest --test-dir build --output-on-failure
 ```
 include/
   BinanceClient.hpp     WebSocket feed, message parsing, quote validation
-  Graph.hpp             market graph + Bellman-Ford cycle detection
+  Graph.hpp             market graph, Bellman-Ford, closest-cycle search
   OrderBook.hpp         thread-safe 5-level order books
   SimulationEngine.hpp  walks the book to estimate fill price and net profit
   StatsCollector.hpp    windowed metrics + CSV export
