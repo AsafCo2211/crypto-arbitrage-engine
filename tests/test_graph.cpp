@@ -228,6 +228,8 @@ TEST(StatsTest, SummaryShowsClosestCycleEvenWithNoOpportunity) {
     std::string out = testing::internal::GetCapturedStdout();
 
     EXPECT_NE(out.find("Opportunities found: 0"), std::string::npos);
+    // The window header reports real elapsed time, not a fixed "30s".
+    EXPECT_NE(out.find(" Last 0s "), std::string::npos) << out;
     EXPECT_NE(out.find("Closest cycle:       -0.2134% net  (USDT->SOL->BTC->USDT)"),
               std::string::npos) << out;
 }

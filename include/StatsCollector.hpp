@@ -37,7 +37,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
-#include <filesystem>
+#include <algorithm>
 
 using SysClock = std::chrono::system_clock;
 
@@ -71,6 +71,8 @@ private:
     long long wOpportunities = 0; ///< Opportunities reported this window
     double    wBestProfit    = 0.0;
     double    wTotalProfit   = 0.0;
+    std::chrono::steady_clock::time_point windowStart =
+        std::chrono::steady_clock::now(); ///< When the current window began
     bool        wHasClosest  = false; ///< Any triangle evaluated this window?
     double      wClosestPct  = 0.0;   ///< Best net result of any triangle (may be < 0)
     std::string wClosestRoute;
@@ -117,8 +119,8 @@ public:
      * rows rather than overwriting. The header is written only if the file
      * is empty (i.e. a brand-new file).
      *
-     * Prints the **absolute path** to stdout so the user knows exactly
-     * where to find the output file.
+     * Prints the path as given (not made absolute) — logs and recordings
+     * shouldn't leak the user's home directory.
      *
      * @param path Path to the CSV file (default: "opportunities.csv")
      */
@@ -137,10 +139,7 @@ public:
         }
 
         csvOpen = true;
-        std::error_code ec;
-        auto abs = std::filesystem::absolute(path, ec);
-        std::cout << "[STATS] CSV logging to: "
-                  << (ec ? path : abs.string()) << '\n';
+        std::cout << "[STATS] CSV logging to: " << path << '\n';
     }
 
     // ── Recording methods ─────────────────────────────────────────────────────
@@ -213,7 +212,9 @@ public:
      * @brief Prints a two-part summary and resets window counters.
      *
      * Outputs two sections:
-     * 1. **Last 30s** — activity since the previous printSummary() call
+     * 1. **Last Ns** — activity since the previous printSummary() call, labelled
+     *    with the real elapsed time (the final summary on exit is usually
+     *    a partial window)
      * 2. **Total run** — cumulative activity since the engine started
      *
      * After printing, all window counters are reset to zero so the next
@@ -241,7 +242,16 @@ public:
         double wAvg = (wOpportunities > 0) ? wTotalProfit / wOpportunities : 0.0;
         double cAvg = (cOpportunities > 0) ? cTotalProfit / cOpportunities : 0.0;
 
-        std::cout << "\n[STATS] ──────────── Last 30s ────────────\n";
+        const auto windowSecs = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - windowStart).count();
+        std::ostringstream title;
+        title << " Last " << windowSecs << "s ";
+        std::string bar = title.str();
+        const int width = 34; // matches the rule width of the other headers
+        int side = std::max(0, (width - static_cast<int>(bar.size())) / 2);
+        std::string rule;
+        for (int i = 0; i < side; ++i) rule += "─";
+        std::cout << "\n[STATS] " << rule << bar << rule << "\n";
         std::cout << "[STATS] Ticks received:      " << wTicks         << '\n';
         std::cout << "[STATS] Quotes rejected:     " << wRejected      << '\n';
         std::cout << "[STATS] Bellman-Ford scans:  " << wScans         << '\n';
@@ -270,6 +280,7 @@ public:
         wTicks = wRejected = wScans = wOpportunities = 0;
         wBestProfit = wTotalProfit = 0.0;
         wHasClosest = false; wClosestPct = 0.0; wClosestRoute.clear();
+        windowStart = std::chrono::steady_clock::now();
     }
 
 private:
