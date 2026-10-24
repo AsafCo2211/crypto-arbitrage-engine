@@ -1,269 +1,156 @@
 # Crypto Arbitrage Engine
 
-A real-time triangular arbitrage detection engine for cryptocurrency markets, written in C++20.
+A real-time triangular-arbitrage detector for the Binance spot market, in C++20. It streams live order books over WebSocket, models the market as a weighted directed graph, finds profitable currency cycles with Bellman-Ford, and then checks whether each one survives real order-book depth.
 
-Connects to Binance via WebSocket, models the market as a directed weighted graph, and runs the **Bellman-Ford algorithm** on every price update to detect negative-weight cycles — which correspond to profitable arbitrage routes. When an opportunity is found, a **slippage simulation** walks the real order book to estimate the net profit at different trade sizes.
+[![CI](https://github.com/AsafCo2211/crypto-arbitrage-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/AsafCo2211/crypto-arbitrage-engine/actions/workflows/ci.yml)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
+![Tests](https://img.shields.io/badge/tests-32%20passing-brightgreen)
 
-> **Disclaimer:** This project is built for learning and portfolio purposes. It does not execute real trades. In live markets, arbitrage opportunities at this scale are closed within milliseconds by co-located HFT systems.
-
----
-
-## Demo
-
-```
-[SYSTEM] Engine running — listening to 20 pairs.
-[STATS] ──────────── Last 30s ────────────
-[STATS] Ticks received:      1,842
-[STATS] Quotes rejected:     0
-[STATS] Bellman-Ford scans:  287
-[STATS] Opportunities found: 2
-[STATS] Best profit seen:    0.23%
-[STATS] ─────────── Total run ───────────
-[STATS] Ticks received:      3,610
-[STATS] Bellman-Ford scans:  541
-[STATS] Opportunities found: 3
-
-[$$$] ARBITRAGE OPPORTUNITY DETECTED! [$$$]
-[ROUTE]  USDT->ETH->BTC->USDT
-[PROFIT] Theoretical: 0.21%
-
-[SIM] Notional $  100  →  net: +0.17%  ✓ viable
-[SIM] Notional $  500  →  net: +0.09%  ✓ viable
-[SIM] Notional $ 1000  →  net: -0.03%  ✗ not viable (book depth exhausted)
-```
+> **Detection and simulation only — it never places orders.** At retail latency these opportunities are usually gone before you could act; the point of the project is the market model, the graph algorithm, and the concurrency around a live feed.
 
 ---
 
-## How It Works
+## The idea in one example
 
-### 1. Graph Model
+Start with 1,000 USDT. Buy ETH, use the ETH to buy BTC, sell the BTC back to USDT. If the three exchange rates are slightly inconsistent, you end the loop with more than 1,000 USDT — after paying a 0.1% fee on every leg.
 
-The market is represented as a directed weighted graph:
-- Each **currency** (BTC, ETH, USDT...) is a node
-- Each **trading pair** produces two directed edges:
-  - `QUOTE → BASE` with rate `1/ask` (buying base)
-  - `BASE → QUOTE` with rate `bid` (selling base)
+Finding such a loop is a graph problem:
 
-### 2. Bellman-Ford & Negative-Weight Cycles
+- Every **currency** is a node.
+- Every **trading pair** gives two edges — `USDT → ETH` at `1 / ask` (buying) and `ETH → USDT` at `bid` (selling).
+- Each edge's weight is **`−log(rate × (1 − fee))`**.
 
-To detect arbitrage, edge weights are transformed using the **negative logarithm** of the exchange rate:
+Logs turn the product of rates along a path into a sum, and the minus sign flips "product greater than 1" into "sum less than 0". So **a profitable loop is exactly a negative-weight cycle** — which Bellman-Ford detects in O(V·E).
+
+## From detection to "would it actually work?"
+
+The theoretical profit uses the best price on each book, as if unlimited size were available there. Real orders eat through several price levels. The engine subscribes to 5 levels per side (`@depth5`) and, for each opportunity, **walks the real book** at several trade sizes:
 
 ```
-weight = -log(rate × (1 - fee))
+Buying $500 of ETH with ask levels  3200.00 × 0.10,  3200.40 × 0.25, ...
+  level 1 fills 0.10 ETH, level 2 fills the rest at a worse price
+  → average fill above the best ask → net profit shrinks as size grows
 ```
 
-Under this transformation:
-- A path's total weight = `-log(product of all rates)`
-- A **negative-weight cycle** = a sequence of trades whose product exceeds 1.0 = **profit**
+Each size is reported as viable or not, and flagged when the 5 visible levels can't fill it at all.
 
-Bellman-Ford detects such cycles in **O(V × E)** time.
+## Guarding against false signals
 
-### 3. Guard Rails
+Live market data is noisy, and a single bad quote can manufacture a fake cycle.
 
-Raw market data is noisy. Several layers of protection prevent false positives:
-
-| Guard | What it does |
+| Guard | What it prevents |
 |---|---|
-| **Quote freshness** | Ignores edges not updated within `maxQuoteAgeMs` |
-| **Profit threshold** | Only reports opportunities above `minProfitPercent` |
-| **Dedup / cooldown** | Suppresses re-reporting the same route within `cooldownSeconds` |
-| **Zero-rate guard** | Skips edges where `log(0)` or `log(negative)` would corrupt the distance array |
-
-### 4. Slippage Simulation
-
-The theoretical profit assumes infinite liquidity at the best price. In reality, large orders "eat through" the order book, causing the average fill price to worsen with trade size.
-
-The engine subscribes to `@depth5` streams (5 price levels per side) and simulates each notional size against the real book:
-
-```
-Buying $500 of ETH at ask=3200.00 (0.5 ETH available):
-  Level 1: spend $1,600 → receive 0.499 ETH (fee applied)
-  Level 2: spend $3,200 → ...
-  → Average fill price: 3201.20 (worse than best ask)
-```
+| **Quote sanity** | Non-positive prices (would break the logarithm) and crossed books where bid ≥ ask (a stale or out-of-order message that looks like free money) |
+| **Freshness** | Edges older than `maxQuoteAgeMs` are ignored, so a stale price can't pair with a fresh one |
+| **Profit threshold** | Only cycles above `minProfitPercent` *after fees* are reported |
+| **Cooldown** | The same route isn't re-reported within `cooldownSeconds` |
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                        main.cpp                         │
-│         (wires components, manages threads)             │
-└────────┬──────────────────┬───────────────┬─────────────┘
-         │                  │               │
-         ▼                  ▼               ▼
-┌─────────────────┐ ┌──────────────┐ ┌──────────────────┐
-│  BinanceClient  │ │    Graph     │ │  StatsCollector  │
-│                 │ │              │ │                  │
-│ WebSocket conn  │ │ Bellman-Ford │ │ ticks / scans /  │
-│ depth5 parser   │ │ cycle detect │ │ opportunities    │
-│ quote validator │ │ dedup/cooldn │ │ CSV export       │
-└────────┬────────┘ └──────┬───────┘ └──────────────────┘
-         │                  │
-         ▼                  ▼
-┌─────────────────┐ ┌──────────────────┐
-│  OrderBookStore │ │ SimulationEngine │
-│                 │ │                  │
-│ 5-level book    │ │ walks book depth │
-│ per symbol      │ │ per notional     │
-└─────────────────┘ └──────────────────┘
-
-         ▲ all parameters from ▼
-         ┌──────────────────┐
-         │   config.json    │
-         └──────────────────┘
+```mermaid
+flowchart LR
+    BN[(Binance<br/>depth5 streams)] -- WebSocket --> BC[BinanceClient<br/>parse + validate]
+    BC -- best bid/ask --> G[Graph<br/>Bellman-Ford]
+    BC -- 5 levels/side --> OB[OrderBookStore]
+    SC[Scanner thread] -- when prices changed --> G
+    G -- negative cycle --> SE[SimulationEngine<br/>walks the book]
+    OB --> SE
+    G --> ST[StatsCollector<br/>console + CSV]
 ```
 
-**Threading model:**
+### Threads and shared state
 
-| Thread | Responsibility |
+| Thread | Role |
 |---|---|
-| WebSocket (IXWebSocket) | Receives price updates, updates graph + order book |
-| Scanner | Wakes on `marketDirty` flag, runs Bellman-Ford |
-| Summary | Prints stats every 30 seconds |
+| WebSocket (IXWebSocket) | Parses each message, updates the graph and the order book |
+| Scanner | When prices have changed, runs Bellman-Ford — at most once per `scanIntervalMs` |
+| Summary | Prints windowed and total stats every 30 seconds |
+| Main | Waits for Ctrl+C / SIGTERM or the `--duration` deadline, then shuts down in order |
 
-All shared state in the market **Graph** is protected by a single `marketMutex`. The `marketDirty` flag is an `std::atomic<bool>` to avoid locking on every tick.
-
-**OrderBookStore** uses a `std::shared_mutex` instead of a plain mutex. Reads (`findEdgeInfo`, `getBook`) acquire a `std::shared_lock`, allowing the scanner thread to read multiple symbols concurrently. Writes (`updateBook`) acquire a `std::unique_lock` for exclusive access during the update.
-
----
-
-## Project Structure
-
-```
-├── config/
-│   └── config.json          # All runtime parameters
-├── include/
-│   ├── Config.hpp           # JSON config loader + validation
-│   ├── Graph.hpp            # Bellman-Ford engine
-│   ├── BinanceClient.hpp    # WebSocket client + depth5 parser
-│   ├── StatsCollector.hpp   # Runtime metrics + CSV export
-│   ├── OrderBook.hpp        # Order book store (thread-safe)
-│   └── SimulationEngine.hpp # Slippage-aware execution simulation
-├── src/
-│   └── main.cpp
-├── tests/
-│   ├── test_graph.cpp       # Bellman-Ford unit tests
-│   ├── test_simulation.cpp  # OrderBook + SimulationEngine tests
-│   └── test_config.cpp      # Config loading + validation tests
-└── .github/
-    └── workflows/
-        └── ci.yml           # GitHub Actions CI
-```
+- The **graph** is guarded by a single mutex. An `std::atomic<bool>` "dirty" flag tells the scanner something changed without taking the lock on every tick, and lets it skip scans when nothing did.
+- The **order book store** uses `std::shared_mutex`: the simulation reads several books concurrently under shared locks, while each WebSocket update takes an exclusive lock.
+- **Shutdown** closes the WebSocket first, so no callback can touch the graph after the worker threads exit.
 
 ---
 
-## Getting Started
+## Build and run
 
-### Prerequisites
+**Requirements:** CMake 3.16+, a C++20 compiler, OpenSSL, nlohmann/json. IXWebSocket is a git submodule; GoogleTest is fetched by CMake.
 
-- CMake ≥ 3.16
-- C++20 compiler (clang++ or g++)
-- OpenSSL
-- [nlohmann/json](https://github.com/nlohmann/json)
-- [IXWebSocket](https://github.com/machinezone/IXWebSocket) (fetched as a git submodule)
-
-On macOS:
 ```bash
+# macOS
 brew install cmake openssl nlohmann-json
-```
-
-On Ubuntu:
-```bash
+# Ubuntu / Debian
 sudo apt-get install cmake build-essential libssl-dev nlohmann-json3-dev
 ```
 
-### Build
-
 ```bash
-# Clone with submodules
-git clone --recurse-submodules https://github.com/your-username/crypto-arbitrage-engine
+git clone --recurse-submodules https://github.com/AsafCo2211/crypto-arbitrage-engine.git
 cd crypto-arbitrage-engine
-
-# Build
-cmake -B build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
+
+./build/ArbitrageEngine                 # run until Ctrl+C
+./build/ArbitrageEngine --duration 120  # stop after two minutes
 ```
 
-### Run
+Detected opportunities are also appended to `opportunities.csv`.
 
-```bash
-./build/ArbitrageEngine
-```
+> Binance blocks connections from some regions (including the US). If the engine connects but receives no ticks, that is the likely cause.
 
-The engine reads `config/config.json` on startup. Edit it to tune parameters without recompiling.
+## Configuration
 
-### Configuration
+`config/config.json` is validated at startup.
 
-```json
-{
-    "fee": 0.001,              // Taker fee per leg (0.1%)
-    "scanIntervalMs": 100,     // How often to run Bellman-Ford
-    "minProfitPercent": 0.1,   // Minimum profit to report (%)
-    "maxQuoteAgeMs": 3000,     // Reject quotes older than this
-    "cooldownSeconds": 10,     // Suppress duplicate alerts
-    "sourceCurrency": "USDT",  // Starting node for Bellman-Ford
-    "simulationNotionals": [100, 500, 1000],  // Trade sizes to simulate ($)
-    "symbols": [ ... ]         // Trading pairs to subscribe to
-}
-```
+| Key | Default | Meaning |
+|---|---|---|
+| `fee` | `0.001` | Taker fee per leg (0.1%) |
+| `minProfitPercent` | `0.1` | Minimum net profit to report, in % |
+| `maxQuoteAgeMs` | `3000` | Ignore quotes older than this |
+| `cooldownSeconds` | `10` | Don't re-report the same route within this window |
+| `scanIntervalMs` | `100` | Minimum time between Bellman-Ford scans |
+| `sourceCurrency` | `"USDT"` | Start node for Bellman-Ford |
+| `simulationNotionals` | `[100, 500, 1000]` | Trade sizes (in USD) to simulate against the book |
+| `symbols` | 20 pairs | Each entry: Binance stream name, base and quote currency |
 
----
+The default market is ten coins quoted in both USDT and BTC, which gives the graph many three-leg cycles through USDT and BTC.
 
-## Running Tests
+## Tests
+
+32 GoogleTest cases, run on every push by GitHub Actions.
 
 ```bash
 cmake -B build -DBUILD_TESTS=ON
 cmake --build build --parallel
-cd build && ctest --output-on-failure
+ctest --test-dir build --output-on-failure
 ```
 
-Expected output:
-```
-100% tests passed, 0 tests failed out of 28
-```
+| File | Covers |
+|---|---|
+| `test_graph.cpp` | Detects a known profitable cycle; no false positive on consistent rates; fees and threshold filter correctly; stale quotes ignored |
+| `test_simulation.cpp` | Order-book lookup by side; slippage on deep vs. shallow books; insufficient-liquidity flag; quote sanity (crossed and locked books) |
+| `test_config.cpp` | Loading, validation, and every error case |
 
-Tests cover:
-- Bellman-Ford correctly detects known arbitrage cycles
-- No false positives on mathematically consistent market rates
-- Fees and profit threshold correctly filter opportunities
-- Order book lookup (ask/bid side selection)
-- Slippage simulation with deep and shallow books
-- `insufficient_liquidity` flag triggered correctly
-- Config loading, validation, and all error cases
+## Project layout
 
----
+```
+include/
+  BinanceClient.hpp     WebSocket feed, message parsing, quote validation
+  Graph.hpp             market graph + Bellman-Ford cycle detection
+  OrderBook.hpp         thread-safe 5-level order books
+  SimulationEngine.hpp  walks the book to estimate fill price and net profit
+  StatsCollector.hpp    windowed metrics + CSV export
+  Config.hpp            JSON config loading and validation
+src/main.cpp            wiring, threads, shutdown
+tests/                  GoogleTest suites
+external/IXWebSocket    submodule
+```
 
 ## Limitations
 
-This engine is a **detection and simulation** tool, not a trading bot.
-
-- **Latency:** WebSocket data arrives with tens of milliseconds of network delay. Real HFT systems co-locate servers inside exchanges for sub-millisecond access. By the time this engine detects an opportunity, it is almost certainly already closed.
-- **Depth:** `@depth5` provides only 5 price levels. Real executions may need more depth for larger notionals.
-- **Single exchange:** True arbitrage also exists across exchanges (e.g. Binance vs Kraken), which this engine does not model.
-- **No execution:** The engine does not place orders. Connecting to a real trading API and managing order lifecycle is a significant additional layer.
-
----
-
-## Roadmap
-
-- [ ] Cross-exchange arbitrage (Binance + Kraken)
-- [ ] Historical backtesting on tick data
-- [ ] Deeper order book (`@depth20`)
-- [ ] Web dashboard for live opportunity visualization
-- [ ] Paper trading mode with simulated order execution
-
----
-
-## Tech Stack
-
-| | |
-|---|---|
-| Language | C++20 |
-| Build | CMake + FetchContent |
-| WebSocket | [IXWebSocket](https://github.com/machinezone/IXWebSocket) |
-| JSON | [nlohmann/json](https://github.com/nlohmann/json) |
-| Testing | [GoogleTest](https://github.com/google/googletest) |
-| CI | GitHub Actions |
-| Data | Binance WebSocket API (`@depth5`) |
+- **Latency.** Data arrives tens of milliseconds late over the public internet; firms that capture these spreads co-locate next to the exchange.
+- **Five levels of depth.** Large sizes can exhaust the visible book; the simulation flags this rather than guessing.
+- **One exchange.** Cross-exchange arbitrage (e.g. Binance vs. Kraken) isn't modelled.
+- **One cycle per scan, from one source.** Bellman-Ford from `USDT` reports the first negative cycle it finds; cycles unreachable from the source aren't searched.
