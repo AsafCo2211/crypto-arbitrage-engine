@@ -2,6 +2,7 @@
 #include "Graph.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <thread>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,4 +159,75 @@ TEST(GraphTest, ZeroRateIsRejectedAndDoesNotCrash) {
 
     testing::internal::GetCapturedStdout();
     testing::internal::GetCapturedStderr();
+}
+// ── Closest cycle (bestTriangle) ─────────────────────────────────────────────
+
+TEST(BestTriangleTest, FairMarketCostsExactlyTheFees) {
+    // Perfectly consistent rates: the only thing a loop can lose is the
+    // fee on each of its three legs → (1 - 0.001)^3 - 1 = -0.2997%.
+    Graph g = buildNoArbitrageGraph(0.001);
+    auto best = g.bestTriangle("USDT", 999999999);
+
+    ASSERT_TRUE(best.has_value());
+    const double expectedPct = (std::pow(1.0 - 0.001, 3) - 1.0) * 100.0;
+    EXPECT_NEAR(best->profitPct, expectedPct, 1e-9);
+    EXPECT_EQ(best->route.rfind("USDT->", 0), 0u);                 // starts at source
+    EXPECT_EQ(best->route.substr(best->route.size() - 4), "USDT"); // ends at source
+}
+
+TEST(BestTriangleTest, MatchesKnownProfitableCycle) {
+    // buildArbitrageGraph: 0.01 * 0.075 * 1400 = 1.05 → +5%.
+    Graph g = buildArbitrageGraph(0.0);
+    auto best = g.bestTriangle("USDT", 999999999);
+
+    ASSERT_TRUE(best.has_value());
+    EXPECT_NEAR(best->profitPct, 5.0, 1e-9);
+    EXPECT_EQ(best->route, "USDT->ETH->BTC->USDT");
+}
+
+TEST(BestTriangleTest, PicksTheBetterOfTwoDirections) {
+    // Both loop directions exist with slightly inconsistent ETH/BTC rates:
+    //   USDT->ETH->BTC->USDT ≈ -0.92%,  USDT->BTC->ETH->USDT ≈ +0.14%.
+    // bestTriangle must pick the second one.
+    Graph g;
+    g.updateExchangeRate("USDT", "ETH", 1.0 / 3200.0, 0.001);
+    g.updateExchangeRate("ETH",  "BTC", 0.0530,       0.001);
+    g.updateExchangeRate("BTC",  "USDT", 60000.0,     0.001);
+    g.updateExchangeRate("USDT", "BTC", 1.0 / 60000.0, 0.001);
+    g.updateExchangeRate("BTC",  "ETH", 1.0 / 0.0531,  0.001);
+    g.updateExchangeRate("ETH",  "USDT", 3200.0,       0.001);
+
+    auto best = g.bestTriangle("USDT", 999999999);
+    ASSERT_TRUE(best.has_value());
+    EXPECT_EQ(best->route, "USDT->BTC->ETH->USDT");
+    // (1/60000)(1/0.0531)(3200) * 0.999^3 - 1
+    const double expectedPct =
+        ((1.0 / 60000.0) * (1.0 / 0.0531) * 3200.0 * std::pow(0.999, 3) - 1.0) * 100.0;
+    EXPECT_NEAR(best->profitPct, expectedPct, 1e-9);
+}
+
+TEST(BestTriangleTest, IgnoresStaleQuotes) {
+    Graph g = buildArbitrageGraph(0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_FALSE(g.bestTriangle("USDT", /*maxQuoteAgeMs=*/10).has_value());
+}
+
+TEST(BestTriangleTest, UnknownSourceReturnsNothing) {
+    Graph g = buildNoArbitrageGraph();
+    EXPECT_FALSE(g.bestTriangle("EUR", 999999999).has_value());
+}
+
+TEST(StatsTest, SummaryShowsClosestCycleEvenWithNoOpportunity) {
+    StatsCollector stats;
+    stats.recordClosestCycle("USDT->ETH->BTC->USDT", -0.3);
+    stats.recordClosestCycle("USDT->SOL->BTC->USDT", -0.2134); // better
+    stats.recordClosestCycle("USDT->ADA->BTC->USDT", -0.5);
+
+    testing::internal::CaptureStdout();
+    stats.printSummary();
+    std::string out = testing::internal::GetCapturedStdout();
+
+    EXPECT_NE(out.find("Opportunities found: 0"), std::string::npos);
+    EXPECT_NE(out.find("Closest cycle:       -0.2134% net  (USDT->SOL->BTC->USDT)"),
+              std::string::npos) << out;
 }

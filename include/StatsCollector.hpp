@@ -71,6 +71,9 @@ private:
     long long wOpportunities = 0; ///< Opportunities reported this window
     double    wBestProfit    = 0.0;
     double    wTotalProfit   = 0.0;
+    bool        wHasClosest  = false; ///< Any triangle evaluated this window?
+    double      wClosestPct  = 0.0;   ///< Best net result of any triangle (may be < 0)
+    std::string wClosestRoute;
 
     // ── Cumulative counters (never reset) ─────────────────────────────────────
     long long cTicks         = 0; ///< Total price updates since startup
@@ -79,6 +82,9 @@ private:
     long long cOpportunities = 0; ///< Total opportunities reported since startup
     double    cBestProfit    = 0.0;
     double    cTotalProfit   = 0.0;
+    bool        cHasClosest  = false;
+    double      cClosestPct  = 0.0;
+    std::string cClosestRoute;
 
     // ── CSV ───────────────────────────────────────────────────────────────────
     std::ofstream csvFile;
@@ -215,6 +221,20 @@ public:
      *
      * Called by the summary thread every 30 seconds, and once more on exit.
      */
+    /**
+     * @brief Records the best three-leg cycle seen in one scan, profitable
+     *        or not. Keeps the maximum per window and for the whole run.
+     */
+    void recordClosestCycle(const std::string& route, double profitPct) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!wHasClosest || profitPct > wClosestPct) {
+            wHasClosest = true; wClosestPct = profitPct; wClosestRoute = route;
+        }
+        if (!cHasClosest || profitPct > cClosestPct) {
+            cHasClosest = true; cClosestPct = profitPct; cClosestRoute = route;
+        }
+    }
+
     void printSummary() {
         std::lock_guard<std::mutex> lock(mutex);
 
@@ -226,6 +246,7 @@ public:
         std::cout << "[STATS] Quotes rejected:     " << wRejected      << '\n';
         std::cout << "[STATS] Bellman-Ford scans:  " << wScans         << '\n';
         std::cout << "[STATS] Opportunities found: " << wOpportunities << '\n';
+        if (wHasClosest) printClosest(wClosestRoute, wClosestPct);
         if (wOpportunities > 0) {
             std::cout << std::fixed << std::setprecision(4);
             std::cout << "[STATS] Best profit:         " << wBestProfit << "%\n";
@@ -237,6 +258,7 @@ public:
         std::cout << "[STATS] Quotes rejected:     " << cRejected      << '\n';
         std::cout << "[STATS] Bellman-Ford scans:  " << cScans         << '\n';
         std::cout << "[STATS] Opportunities found: " << cOpportunities << '\n';
+        if (cHasClosest) printClosest(cClosestRoute, cClosestPct);
         if (cOpportunities > 0) {
             std::cout << std::fixed << std::setprecision(4);
             std::cout << "[STATS] Best profit:         " << cBestProfit << "%\n";
@@ -247,5 +269,14 @@ public:
         // Reset window counters only — cumulative counters are never reset
         wTicks = wRejected = wScans = wOpportunities = 0;
         wBestProfit = wTotalProfit = 0.0;
+        wHasClosest = false; wClosestPct = 0.0; wClosestRoute.clear();
+    }
+
+private:
+    static void printClosest(const std::string& route, double pct) {
+        std::ostringstream v;
+        v << std::showpos << std::fixed << std::setprecision(4) << pct << "% net";
+        std::cout << "[STATS] Closest cycle:       " << v.str()
+                  << "  (" << route << ")\n";
     }
 };

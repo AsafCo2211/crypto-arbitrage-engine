@@ -49,6 +49,7 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
+#include <optional>
 #include "StatsCollector.hpp"
 #include "SimulationEngine.hpp"
 
@@ -91,6 +92,17 @@ struct Edge {
  * market.findArbitrage("USDT", 0.1, 3000, 10, {100, 500, 1000});
  * @endcode
  */
+/**
+ * @brief A three-leg cycle and its net result after fees.
+ *
+ * profitPct is negative when the loop loses money — which, on a liquid
+ * exchange, is almost always.
+ */
+struct CycleQuote {
+    std::string route;     ///< e.g. "USDT->ETH->BTC->USDT"
+    double      profitPct; ///< Net profit in %, after the fee on every leg
+};
+
 class Graph {
 private:
     int numVertices;
@@ -210,6 +222,64 @@ public:
         }
     }
 
+    /**
+     * @brief Evaluates every three-leg loop source → A → B → source and
+     *        returns the one with the best net result, profitable or not.
+     *
+     * Bellman-Ford only answers "is there a profitable cycle?". When the
+     * answer is no — the normal case on a liquid market — this answers
+     * "how close did the market get?", which is what makes a live run
+     * informative. Only edges fresher than maxQuoteAgeMs are used.
+     *
+     * Cost is O(E²) edge pairs with hash lookups for the closing leg —
+     * about 1,600 pairs for the default 20-symbol market.
+     *
+     * @return std::nullopt if the source is unknown or no fresh triangle
+     *         through it exists.
+     */
+    std::optional<CycleQuote> bestTriangle(const std::string& sourceCurrency,
+                                           int maxQuoteAgeMs) const {
+        auto srcIt = currencyToIndex.find(sourceCurrency);
+        if (srcIt == currencyToIndex.end()) return std::nullopt;
+        const int  s   = srcIt->second;
+        const auto now = Clock::now();
+
+        auto fresh = [&](const Edge& e) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now - e.lastUpdated).count() <= maxQuoteAgeMs;
+        };
+        auto netRate = [](const Edge& e) { return e.weight * (1.0 - e.fee); };
+
+        std::optional<CycleQuote> best;
+        double bestMultiplier = 0.0;
+
+        for (const auto& first : edges) {                 // s → a
+            if (first.source != s || !fresh(first)) continue;
+            const int a = first.destination;
+
+            for (const auto& second : edges) {            // a → b
+                if (second.source != a || second.destination == s ||
+                    !fresh(second)) continue;
+                const int b = second.destination;
+
+                auto closeIt = edgeIndex.find(makeEdgeKey(b, s)); // b → s
+                if (closeIt == edgeIndex.end()) continue;
+                const Edge& third = edges[closeIt->second];
+                if (!fresh(third)) continue;
+
+                double m = netRate(first) * netRate(second) * netRate(third);
+                if (!best || m > bestMultiplier) {
+                    bestMultiplier = m;
+                    best = CycleQuote{
+                        indexToCurrency[s] + "->" + indexToCurrency[a] + "->" +
+                        indexToCurrency[b] + "->" + indexToCurrency[s],
+                        (m - 1.0) * 100.0};
+                }
+            }
+        }
+        return best;
+    }
+
     int getNumVertices()                                  const { return numVertices; }
     const std::vector<Edge>& getEdges()                   const { return edges; }
     const std::vector<std::string>& getIndexToCurrency()  const { return indexToCurrency; }
@@ -264,7 +334,11 @@ public:
             return;
         }
 
-        if (stats) stats->recordScan();
+        if (stats) {
+            stats->recordScan();
+            if (auto closest = bestTriangle(sourceCurrency, maxQuoteAgeMs))
+                stats->recordClosestCycle(closest->route, closest->profitPct);
+        }
 
         const int sourceNode = currencyToIndex[sourceCurrency];
         const auto now       = Clock::now();
