@@ -8,6 +8,12 @@ A real-time triangular-arbitrage detector for the Binance spot market, in C++20.
 
 > **Detection and simulation only — it never places orders.** At retail latency these opportunities are usually gone before you could act; the point of the project is the market model, the graph algorithm, and the concurrency around a live feed.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="A 65-second live run against Binance: about 1,000 order-book updates, 477 scans, no profitable cycle, closest cycle -0.27% after fees" width="640">
+</p>
+
+A real 65-second run against live Binance data (waits between summaries shortened). About 1,000 order-book updates, 477 Bellman-Ford scans, **no profitable cycle** — and the closest one, `USDT → LINK → BTC → USDT`, finished **0.27% below break-even after fees**. See [When there's nothing to find](#when-theres-nothing-to-find).
+
 ---
 
 ## The idea in one example
@@ -38,14 +44,14 @@ Each size is reported as viable or not, and flagged when the 5 visible levels ca
 
 On a liquid exchange, a three-leg loop costs about 0.3% in fees alone, so most of the time no profitable cycle exists — and "0 opportunities" says nothing about how close the market came.
 
-So on every scan the engine also evaluates **every three-leg loop through the source currency** (`Graph::bestTriangle`, ~1,600 edge pairs for the default market) and keeps the best net result, profitable or not. The 30-second summary reports it, for example:
+So on every scan the engine also evaluates **every three-leg loop through the source currency** (`Graph::bestTriangle`, ~1,600 edge pairs for the default market) and keeps the best net result, profitable or not. The 30-second summary reports it. From the recorded run above:
 
 ```
 [STATS] Opportunities found: 0
-[STATS] Closest cycle:       -0.2134% net  (USDT->SOL->BTC->USDT)
+[STATS] Closest cycle:       -0.2666% net  (USDT->LINK->BTC->USDT)
 ```
 
-That number is a direct measurement of market efficiency: how far the best available loop sits below break-even after fees.
+Three legs at 0.1% cost 0.2997% in fees, so that loop was actually **+0.03% before fees** — a real price inconsistency, just smaller than the cost of trading it. That gap is a direct measurement of how efficient the market is.
 
 ## Guarding against false signals
 
